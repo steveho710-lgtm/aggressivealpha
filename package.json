@@ -1,14 +1,13 @@
 {
   "name": "aggressivealpha",
   "version": "1.0.0",
-  "description": "US Stock Signal Scanner - Real Yahoo Finance Data",
+  "description": "US Stock Signal Scanner - Alpha Vantage Data",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
   },
   "dependencies": {
     "express": "^4.18.2",
-    "yahoo-finance2": "^2.11.3",
     "cors": "^2.8.5"
   },
   "engines": {

@@ -1,0 +1,108 @@
+# ⚡ AggressiveAlpha — Deployment Guide
+## Access from anywhere — phone, tablet, desktop
+
+---
+
+## WHAT YOU NEED (all free)
+1. GitHub account — github.com
+2. Railway account — railway.app (sign up with GitHub)
+
+---
+
+## STEP 1 — Upload to GitHub (5 minutes)
+
+1. Go to github.com and sign in
+2. Click the "+" button (top right) → "New repository"
+3. Name it: aggressivealpha
+4. Set to Public
+5. Click "Create repository"
+6. On the next page, click "uploading an existing file"
+7. Upload ALL these files keeping the folder structure:
+   - package.json        → root level
+   - server.js           → root level
+   - public/index.html   → inside a folder called "public"
+8. Click "Commit changes"
+
+---
+
+## STEP 2 — Deploy on Railway (5 minutes)
+
+1. Go to railway.app
+2. Click "Login" → "Login with GitHub"
+3. Click "New Project"
+4. Click "Deploy from GitHub repo"
+5. Select your "aggressivealpha" repository
+6. Railway automatically detects it's a Node.js app
+7. Click "Deploy Now"
+8. Wait about 60 seconds for deployment
+
+---
+
+## STEP 3 — Get your URL
+
+1. After deployment, click on your project
+2. Click "Settings" → "Networking" → "Generate Domain"
+3. You'll get a URL like: https://aggressivealpha-production.up.railway.app
+4. Open that URL in any browser — your dashboard is live!
+
+---
+
+## STEP 4 — Use it on your phone
+
+1. Open your URL in Safari (iPhone) or Chrome (Android)
+2. Tap the Share button → "Add to Home Screen"
+3. Now you have an app icon on your phone!
+4. Tap it anytime to open your dashboard
+
+---
+
+## HOW TO USE THE DASHBOARD
+
+1. Open your Railway URL
+2. Tap "SCAN 100 US STOCKS"
+3. Wait about 2-3 minutes (fetching real Yahoo Finance data)
+4. See your Top 10 buy signals with:
+   - Live price
+   - Entry / Target / Stop prices
+   - 52-week range position
+   - Dividend yield
+   - RSI, Volume, Momentum
+   - Confidence score
+5. Tap "Log Buy" on signals you act on
+6. Switch to "All Results" tab to see all 100 stocks ranked
+
+---
+
+## BEST TIME TO SCAN (Australian time)
+
+NYSE/NASDAQ market hours = 1:30 AM – 8:00 AM AEST
+- Scan BEFORE 1:30 AM AEST = plan for that night's session
+- Scan AFTER 8:00 AM AEST = review yesterday's close, plan for next session
+- Most useful: scan around 8-9 AM AEST with end-of-day prices
+
+---
+
+## COST
+
+Railway free tier = $5 free credit per month
+Your app uses approximately $0.50-1.00/month
+So it's effectively FREE for personal use.
+
+---
+
+## TROUBLESHOOTING
+
+App won't load?
+→ Check Railway dashboard — make sure deployment is "Active" (green)
+
+Scan takes too long?
+→ Normal — fetching 100 stocks takes 2-3 minutes. Don't close the browser.
+
+Some stocks show as skipped?
+→ Normal — Yahoo Finance occasionally blocks certain tickers temporarily.
+  Re-scan to try again.
+
+---
+
+⚠️ IMPORTANT: These are rule-based signals only.
+Not financial advice. Always do your own research before trading.

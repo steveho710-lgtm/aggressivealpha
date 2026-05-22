@@ -1,7 +1,8 @@
-const express = require("express");
-const cors    = require("cors");
-const path    = require("path");
-const https   = require("https");
+const express  = require("express");
+const cors     = require("cors");
+const path     = require("path");
+const https    = require("https");
+const cron     = require("node-cron");
 
 const app    = express();
 const PORT   = process.env.PORT || 3000;
@@ -14,45 +15,39 @@ app.use(express.static(path.join(__dirname, "public")));
 
 // ── Curated 24-stock watchlist ────────────────────────────────────────────────
 // Excludes stocks already in portfolio: NVDA, META, MSFT, PLTR
-// Fits perfectly within Alpha Vantage 25 calls/day free tier
 const STOCKS = [
-  // TECHNOLOGY
   { ticker:"AAPL",  name:"Apple",               sector:"Technology" },
   { ticker:"AMD",   name:"AMD",                  sector:"Technology" },
   { ticker:"GOOGL", name:"Alphabet",             sector:"Technology" },
   { ticker:"CRM",   name:"Salesforce",           sector:"Technology" },
-  // FINANCIALS
   { ticker:"JPM",   name:"JPMorgan Chase",       sector:"Financials" },
   { ticker:"GS",    name:"Goldman Sachs",        sector:"Financials" },
   { ticker:"V",     name:"Visa",                 sector:"Financials" },
-  // HEALTHCARE
   { ticker:"LLY",   name:"Eli Lilly",            sector:"Healthcare" },
   { ticker:"UNH",   name:"UnitedHealth",         sector:"Healthcare" },
-  // CONSUMER
   { ticker:"AMZN",  name:"Amazon",               sector:"Consumer" },
   { ticker:"TSLA",  name:"Tesla",                sector:"Consumer" },
   { ticker:"COST",  name:"Costco",               sector:"Consumer" },
-  // ENERGY
   { ticker:"XOM",   name:"ExxonMobil",           sector:"Energy" },
   { ticker:"CVX",   name:"Chevron",              sector:"Energy" },
-  // INDUSTRIALS
   { ticker:"CAT",   name:"Caterpillar",          sector:"Industrials" },
   { ticker:"LMT",   name:"Lockheed Martin",      sector:"Industrials" },
-  // COMMUNICATION
   { ticker:"NFLX",  name:"Netflix",              sector:"Communication" },
   { ticker:"UBER",  name:"Uber",                 sector:"Communication" },
-  // AI & GROWTH
   { ticker:"ARM",   name:"ARM Holdings",         sector:"AI & Growth" },
   { ticker:"MSTR",  name:"MicroStrategy",        sector:"AI & Growth" },
   { ticker:"SMCI",  name:"Super Micro",          sector:"AI & Growth" },
   { ticker:"SOUN",  name:"SoundHound AI",        sector:"AI & Growth" },
-  // MATERIALS
   { ticker:"NEM",   name:"Newmont Mining",       sector:"Materials" },
   { ticker:"FCX",   name:"Freeport-McMoRan",     sector:"Materials" },
 ];
 
-// Market indices to show context
 const INDEX_TICKERS = ["SPY","QQQ","GLD","UUP"];
+
+// ── Cache — stores latest scan results in memory ──────────────────────────────
+let cachedResults = null;
+let cacheTime     = null;
+let scanInProgress = false;
 
 // ── HTTP helper ───────────────────────────────────────────────────────────────
 function fetchJSON(url) {
@@ -72,7 +67,7 @@ function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
 // ── Alpha Vantage: Daily time series ─────────────────────────────────────────
 async function fetchDailySeries(ticker) {
-  const url = `${AV_URL}?function=TIME_SERIES_DAILY&symbol=${ticker}&outputsize=compact&apikey=${AV_KEY}`;
+  const url  = `${AV_URL}?function=TIME_SERIES_DAILY&symbol=${ticker}&outputsize=compact&apikey=${AV_KEY}`;
   const data = await fetchJSON(url);
   const series = data["Time Series (Daily)"];
   if (!series) throw new Error(data["Note"] || data["Information"] || `No series for ${ticker}`);
@@ -85,7 +80,7 @@ async function fetchDailySeries(ticker) {
   };
 }
 
-// ── Alpha Vantage: Global quote (current price) ───────────────────────────────
+// ── Alpha Vantage: Global quote ───────────────────────────────────────────────
 async function fetchGlobalQuote(ticker) {
   const url  = `${AV_URL}?function=GLOBAL_QUOTE&symbol=${ticker}&apikey=${AV_KEY}`;
   const data = await fetchJSON(url);
@@ -93,9 +88,7 @@ async function fetchGlobalQuote(ticker) {
   if (!q || !q["05. price"]) throw new Error(`No quote for ${ticker}`);
   return {
     price:     parseFloat(q["05. price"]),
-    prevClose: parseFloat(q["08. previous close"]),
     dayChgPct: parseFloat(q["10. change percent"]?.replace("%", "")),
-    volume:    parseFloat(q["06. volume"]),
   };
 }
 
@@ -145,8 +138,6 @@ function scoreStock(stock, closes, highs, lows, volumes, price, dayChg) {
   const ema9    = calcEMA(closes, 9);
   const atr     = calcATR(highs, lows, closes);
   const vs      = calcVolSpike(volumes);
-
-  // 52-week high/low from price history
   const w52High = Math.max(...closes);
   const w52Low  = Math.min(...closes);
   const w52Range= w52High - w52Low;
@@ -180,7 +171,7 @@ function scoreStock(stock, closes, highs, lows, volumes, price, dayChg) {
     ...stock,
     week52High:    fmt(w52High),
     week52Low:     fmt(w52Low),
-    dividendYield: null, // requires extra API call — saved for premium
+    dividendYield: null,
     score,
     signals:    signals.slice(0, 5),
     confidence: Math.min(97, Math.round(score * 1.05)),
@@ -199,54 +190,87 @@ function scoreStock(stock, closes, highs, lows, volumes, price, dayChg) {
   };
 }
 
-// ── /api/scan ─────────────────────────────────────────────────────────────────
-// Fetches TIME_SERIES_DAILY for each of the 24 stocks = 24 API calls
-// Stays within Alpha Vantage free tier (25 calls/day, 5 calls/min)
-app.get("/api/scan", async (req, res) => {
-  try {
-    console.log(`🔍 Scanning ${STOCKS.length} curated stocks...`);
-    const results = [], failed = [];
+// ── Core scan function (used by both scheduler and manual trigger) ─────────────
+async function runScan() {
+  if (scanInProgress) {
+    console.log("⏳ Scan already in progress, skipping...");
+    return;
+  }
+  scanInProgress = true;
+  console.log(`\n🔍 Starting scheduled scan of ${STOCKS.length} stocks at ${new Date().toISOString()}`);
 
-    for (let i = 0; i < STOCKS.length; i++) {
-      const stock = STOCKS[i];
-      console.log(`  [${i+1}/${STOCKS.length}] ${stock.ticker}...`);
-      try {
-        const series  = await fetchDailySeries(stock.ticker);
-        const price   = series.closes[series.closes.length - 1];
-        const prev    = series.closes[series.closes.length - 2];
-        const dayChg  = prev ? ((price - prev) / prev) * 100 : 0;
-        const scored  = scoreStock(stock, series.closes, series.highs, series.lows, series.volumes, price, dayChg);
-        if (scored) {
-          results.push(scored);
-          console.log(`  ✅ ${stock.ticker} — $${price.toFixed(2)} | score: ${scored.score}`);
-        }
-      } catch(e) {
-        console.log(`  ❌ ${stock.ticker}: ${e.message}`);
-        failed.push(stock.ticker);
+  const results = [], failed = [];
+
+  for (let i = 0; i < STOCKS.length; i++) {
+    const stock = STOCKS[i];
+    console.log(`  [${i+1}/${STOCKS.length}] ${stock.ticker}...`);
+    try {
+      const series = await fetchDailySeries(stock.ticker);
+      const price  = series.closes[series.closes.length - 1];
+      const prev   = series.closes[series.closes.length - 2];
+      const dayChg = prev ? ((price - prev) / prev) * 100 : 0;
+      const scored = scoreStock(stock, series.closes, series.highs, series.lows, series.volumes, price, dayChg);
+      if (scored) {
+        results.push(scored);
+        console.log(`  ✅ ${stock.ticker} $${price.toFixed(2)} | score: ${scored.score}`);
       }
-      // Alpha Vantage free: 5 calls/min = wait 13s between calls
-      if (i < STOCKS.length - 1) await sleep(13000);
+    } catch(e) {
+      console.log(`  ❌ ${stock.ticker}: ${e.message}`);
+      failed.push(stock.ticker);
     }
+    if (i < STOCKS.length - 1) await sleep(13000);
+  }
 
-    if (!results.length) {
-      return res.status(500).json({
-        success: false,
-        error: "No data returned. You may have hit the 25 calls/day limit — try again tomorrow, or check your Alpha Vantage API key."
-      });
-    }
-
-    const sorted = results.sort((a, b) => b.score - a.score);
-    console.log(`✅ Scan complete — ${results.length} stocks scored, ${failed.length} failed`);
-    res.json({
+  if (results.length > 0) {
+    cachedResults = {
       success:   true,
-      results:   sorted,
+      results:   results.sort((a,b) => b.score - a.score),
       failed,
       total:     STOCKS.length,
       scannedAt: new Date().toISOString(),
-    });
+      scheduled: true,
+    };
+    cacheTime = new Date();
+    console.log(`✅ Scan complete — ${results.length} scored, cached at ${cacheTime.toISOString()}`);
+  } else {
+    console.log("❌ Scan returned no results — cache not updated");
+  }
+  scanInProgress = false;
+}
 
+// ── Scheduler: runs at 1:00 AM AEST = 3:00 PM UTC every weekday ──────────────
+// Cron format: minute hour day month weekday
+// Monday–Friday only (no point scanning on weekends when markets are closed)
+cron.schedule("0 15 * * 1-5", () => {
+  console.log("⏰ Scheduled scan triggered (1:00 AM AEST)");
+  runScan();
+}, { timezone: "UTC" });
+
+console.log("⏰ Scheduler set: daily scan at 1:00 AM AEST (3:00 PM UTC), Mon–Fri");
+
+// ── /api/scan ─────────────────────────────────────────────────────────────────
+// Returns cached results instantly if available, otherwise runs fresh scan
+app.get("/api/scan", async (req, res) => {
+  const forceRefresh = req.query.refresh === "true";
+
+  // Return cached results if fresh (less than 23 hours old) and not forcing refresh
+  if (cachedResults && cacheTime && !forceRefresh) {
+    const ageHours = (new Date() - cacheTime) / (1000 * 60 * 60);
+    if (ageHours < 23) {
+      console.log(`📦 Returning cached results (${ageHours.toFixed(1)}h old)`);
+      return res.json({ ...cachedResults, fromCache: true, cacheAgeHours: parseFloat(ageHours.toFixed(1)) });
+    }
+  }
+
+  // No cache or force refresh — run scan now
+  try {
+    await runScan();
+    if (cachedResults) {
+      res.json({ ...cachedResults, fromCache: false });
+    } else {
+      res.status(500).json({ success: false, error: "Scan failed — check Alpha Vantage API limit (25 calls/day)" });
+    }
   } catch(err) {
-    console.error("Scan error:", err);
     res.status(500).json({ success: false, error: err.message });
   }
 });
@@ -270,15 +294,24 @@ app.get("/api/indices", async (req, res) => {
   }
 });
 
+// ── /api/status ───────────────────────────────────────────────────────────────
+app.get("/api/status", (req, res) => {
+  const ageHours = cacheTime ? ((new Date() - cacheTime) / (1000 * 60 * 60)).toFixed(1) : null;
+  res.json({
+    status:        "ok",
+    stocks:        STOCKS.length,
+    watchlist:     STOCKS.map(s => s.ticker),
+    scanInProgress,
+    lastScan:      cacheTime ? cacheTime.toISOString() : "Never",
+    cacheAgeHours: ageHours,
+    nextScheduled: "Daily at 1:00 AM AEST (Mon–Fri)",
+    dataSource:    "Alpha Vantage (25 calls/day free tier)",
+  });
+});
+
 // ── /api/health ───────────────────────────────────────────────────────────────
 app.get("/api/health", (req, res) => {
-  res.json({
-    status:    "ok",
-    message:   "AggressiveAlpha running!",
-    stocks:    STOCKS.length,
-    watchlist: STOCKS.map(s => s.ticker),
-    dataSource:"Alpha Vantage (25 calls/day free tier)",
-  });
+  res.json({ status: "ok", message: "AggressiveAlpha running with auto-scheduler!" });
 });
 
 // Serve frontend
@@ -287,6 +320,10 @@ app.get("*", (req, res) => {
 });
 
 app.listen(PORT, () => {
-  console.log(`⚡ AggressiveAlpha on http://localhost:${PORT}`);
-  console.log(`   Watchlist: ${STOCKS.map(s => s.ticker).join(", ")}`);
+  console.log(`\n⚡ AggressiveAlpha running on port ${PORT}`);
+  console.log(`   Watchlist (${STOCKS.length} stocks): ${STOCKS.map(s => s.ticker).join(", ")}`);
+  console.log(`   Auto-scan: 1:00 AM AEST daily (Mon–Fri)`);
+  console.log(`   Manual scan: GET /api/scan`);
+  console.log(`   Force refresh: GET /api/scan?refresh=true`);
+  console.log(`   Status: GET /api/status\n`);
 });
